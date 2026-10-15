@@ -80,6 +80,11 @@ func run(args []string) int {
 	f.BoolVarP(&opts.Yes, "yes", "y", false, "do not ask before replan, suspend or resume (approvals always ask)")
 	f.DurationVar(&opts.StuckThreshold, "stuck-threshold", tf.DefaultStuckThreshold, "age after which a Progressing/Unknown plan counts as stuck")
 
+	// Completion runs after flag parsing up to the cursor, so --kube is known here.
+	_ = cmd.RegisterFlagCompletionFunc("context", func(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeContexts(opts.Kubeconfig, os.Getenv("KUBECONFIG"), toComplete)
+	})
+
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		u.Error("%v", err)
 		u.Println()
@@ -87,6 +92,17 @@ func run(args []string) int {
 		return 1
 	}
 	return exitCode
+}
+
+// completeContexts offers the kubeconfig's context names for --context. It
+// must stay silent: anything printed would end up in the user's shell line.
+func completeContexts(kubeconfig, env, toComplete string) ([]string, cobra.ShellCompDirective) {
+	cfg, err := kube.Load(kube.KubeconfigPaths(kubeconfig, env))
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	// NoSpace: the user may continue the comma-separated list.
+	return kube.CompleteContexts(cfg.Contexts(), toComplete), cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace
 }
 
 func execute(ctx context.Context, u *ui.UI, opts app.Options) int {

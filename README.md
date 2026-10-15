@@ -36,6 +36,15 @@ go build -o bin/tfgate ./cmd/tfgate
 go install ./cmd/tfgate
 ```
 
+### Shell completion
+
+`tfgate completion <bash|zsh|fish|powershell>` prints a completion script. Flag names and the contexts of your kubeconfig (`-c`) are completed; after a comma, `-c a,<TAB>` completes the next context. `--kube` is honored when it comes before `-c`.
+
+```sh
+# zsh, add to ~/.zshrc
+source <(tfgate completion zsh)
+```
+
 ## Usage
 
 ```

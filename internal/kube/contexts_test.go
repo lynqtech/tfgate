@@ -220,3 +220,27 @@ func TestClient(t *testing.T) {
 		t.Errorf("Client(unknown context) err = %v, want it to name the context", err)
 	}
 }
+
+func TestCompleteContexts(t *testing.T) {
+	tests := []struct {
+		name       string
+		toComplete string
+		want       []string
+	}{
+		{"empty offers all", "", available},
+		{"prefix", "clientA", []string{"clientA-prod", "clientA-stage"}},
+		{"no match", "nope", nil},
+		{"exact name still offered", "clientA-prod", []string{"clientA-prod"}},
+		{"second entry keeps the list prefix", "clientA-prod,clientB", []string{"clientA-prod,clientB-prod", "clientA-prod,clientB-stage"}},
+		{"trailing comma offers the rest", "clientA-prod,", []string{"clientA-prod,clientA-stage", "clientA-prod,clientB-prod", "clientA-prod,clientB-stage"}},
+		{"already selected is skipped", "clientA-prod,clientA", []string{"clientA-prod,clientA-stage"}},
+		{"substring selector in the list is not a context", "stage,clientA", []string{"stage,clientA-prod", "stage,clientA-stage"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CompleteContexts(available, tt.toComplete); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("CompleteContexts(%q) = %v, want %v", tt.toComplete, got, tt.want)
+			}
+		})
+	}
+}

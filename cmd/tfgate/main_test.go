@@ -5,9 +5,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"tfgate/internal/app"
 	"tfgate/internal/tf"
@@ -143,5 +146,35 @@ func TestExecuteUnknownContextDoesNotHideOtherContexts(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "context 'nope' does not exist") || !strings.Contains(out.String(), "Iterating over all TF stacks in context: clientA-stage") {
 		t.Errorf("want both the error and the valid context processed, output:\n%s", out)
+	}
+}
+
+func TestCompleteContexts(t *testing.T) {
+	cfg := writeKubeconfig(t, kubeconfigWithCurrent)
+
+	got, directive := completeContexts(cfg, "", "client")
+	if !reflect.DeepEqual(got, []string{"clientA-stage"}) {
+		t.Errorf("completions = %v, want [clientA-stage]", got)
+	}
+	if directive&cobra.ShellCompDirectiveNoFileComp == 0 {
+		t.Errorf("directive %v must suppress file completion", directive)
+	}
+
+	// The kubeconfig comes from the environment when --kube is not given.
+	if got, _ := completeContexts("", cfg, "client"); !reflect.DeepEqual(got, []string{"clientA-stage"}) {
+		t.Errorf("completions via env = %v, want [clientA-stage]", got)
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	if got, directive := completeContexts(missing, "", ""); got != nil || directive != cobra.ShellCompDirectiveError {
+		t.Errorf("broken kubeconfig: got %v, %v, want nil, ShellCompDirectiveError", got, directive)
+	}
+}
+
+// TestRunCompletionIsRegistered pins that the cobra completion plumbing is
+// wired up and does not break normal flag handling.
+func TestRunCompletionIsRegistered(t *testing.T) {
+	if code := run([]string{"__complete", "-c", ""}); code != 0 {
+		t.Errorf("run(__complete) = %d, want 0", code)
 	}
 }

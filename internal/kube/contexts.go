@@ -144,6 +144,29 @@ func ResolveContexts(available []string, current string, requested []string, all
 	return result, errs
 }
 
+// CompleteContexts returns the shell completions for a comma-separated
+// --context value. Only the entry after the last comma is completed. Every
+// result keeps the entries before it, since shells replace the whole word, and
+// contexts that are already listed are not offered again.
+func CompleteContexts(available []string, toComplete string) []string {
+	head, tail := "", toComplete
+	if i := strings.LastIndex(toComplete, ","); i >= 0 {
+		head, tail = toComplete[:i+1], toComplete[i+1:]
+	}
+	chosen := map[string]bool{}
+	for _, c := range strings.Split(strings.TrimSuffix(head, ","), ",") {
+		chosen[strings.TrimSpace(c)] = true
+	}
+
+	var result []string
+	for _, c := range available {
+		if strings.HasPrefix(c, tail) && !chosen[c] {
+			result = append(result, head+c)
+		}
+	}
+	return result
+}
+
 // Scheme returns a scheme with core and tofu-controller types registered.
 func Scheme() (*runtime.Scheme, error) {
 	s := runtime.NewScheme()
