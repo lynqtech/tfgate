@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -499,6 +500,124 @@ func TestBulkModeListsOnce(t *testing.T) {
 					t.Errorf("bulk=%v: %d list calls, want %d", bulk, lists, want)
 				}
 			})
+		}
+	}
+}
+
+// TestBulkSecretsDropsBinaryPlanfiles checks that bulk mode does not keep the
+// binary planfile Secrets in memory, only the readable JSON plans.
+func TestBulkSecretsDropsBinaryPlanfiles(t *testing.T) {
+	obj := newTerraform("stack-a", "plan-main-abc123", "json")
+	objs := append(asObjects(binaryPlanSecrets(t, obj, "plan-main-abc123")),
+		asObjects(planSecrets(t, obj, "plan-main-abc123", "Plan: 1 to add."))...)
+	p := NewPlans(newFake(t, objs...), true)
+
+	got, err := p.Readable(context.Background(), obj)
+	if err != nil || got != "Plan: 1 to add." {
+		t.Fatalf("Readable = %q, %v", got, err)
+	}
+	kept := 0
+	for _, items := range p.secrets {
+		for _, s := range items {
+			kept++
+			if !maybeJSONPlan(s.Labels[plan.TFPlanNameLabel]) {
+				t.Errorf("kept secret %s with label %q", s.Name, s.Labels[plan.TFPlanNameLabel])
+			}
+		}
+	}
+	if kept == 0 {
+		t.Error("no secrets kept")
+	}
+}
+
+func TestMaybeJSONPlan(t *testing.T) {
+	long := strings.Repeat("a", 70)
+	for label, want := range map[string]bool{
+		"stack-a.json": true,
+		"stack-a":      false,
+		plan.SafeLabelValue(long + jsonPlanSuffix): true, // hashed, suffix is gone
+	} {
+		if got := maybeJSONPlan(label); got != want {
+			t.Errorf("maybeJSONPlan(%q) = %v, want %v", label, got, want)
+		}
+	}
+}
+
+// TestBulkListsReloadAfterTTL pins the bounded refresh: lookups within the TTL
+// are served from memory, the first one after it lists again and sees the new
+// plan.
+func TestBulkListsReloadAfterTTL(t *testing.T) {
+	for _, store := range []string{"human", "json"} {
+		t.Run(store, func(t *testing.T) {
+			obj := newTerraform("stack-a", "plan-main-old", store)
+			create := func(id, text string) []client.Object {
+				if store == "human" {
+					return planConfigMaps(t, obj, id, text)
+				}
+				return asObjects(planSecrets(t, obj, id, text))
+			}
+			scheme, err := kube.Scheme()
+			if err != nil {
+				t.Fatal(err)
+			}
+			lists := 0
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(create("plan-main-old", "old plan")...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, l client.ObjectList, opts ...client.ListOption) error {
+						lists++
+						return c.List(ctx, l, opts...)
+					},
+				}).Build()
+
+			now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+			p := NewPlans(kubeClient, true)
+			p.Now = func() time.Time { return now }
+			read := func() string {
+				t.Helper()
+				got, err := p.Readable(context.Background(), obj)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got
+			}
+
+			if got := read(); got != "old plan" {
+				t.Fatalf("Readable = %q", got)
+			}
+			// The controller replaces the plan, which the cache cannot know.
+			replaceStoredPlan(t, kubeClient, create("plan-main-old", "old plan"), create("plan-main-new", "new plan"))
+			obj.Status.Plan.Pending = "plan-main-new"
+
+			now = now.Add(bulkTTL)
+			if _, err := p.Readable(context.Background(), obj); err == nil {
+				t.Error("stale cache served within the TTL for a changed plan ID, want the plan ID check to refuse it")
+			}
+			if lists != 1 {
+				t.Errorf("lists within TTL = %d, want 1", lists)
+			}
+
+			now = now.Add(time.Second)
+			if got := read(); got != "new plan" {
+				t.Errorf("Readable after TTL = %q, want the new plan", got)
+			}
+			if lists != 2 {
+				t.Errorf("lists after TTL = %d, want 2", lists)
+			}
+		})
+	}
+}
+
+// replaceStoredPlan deletes the objects of the old plan and creates the new ones.
+func replaceStoredPlan(t *testing.T, c client.Client, old, fresh []client.Object) {
+	t.Helper()
+	for _, o := range old {
+		if err := c.Delete(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, o := range fresh {
+		if err := c.Create(context.Background(), o); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

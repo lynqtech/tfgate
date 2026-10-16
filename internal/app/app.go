@@ -66,15 +66,43 @@ type App struct {
 	Opts      Options
 	NewClient func(kubeContext string) (client.Client, error)
 	Now       func() time.Time
+	// Substring maps contexts that were selected by substring match to the
+	// entry that matched them, see kube.ResolveContexts. Optional.
+	Substring map[string]string
 }
 
 // Run processes all contexts and returns the number of errors encountered.
 func (a *App) Run(ctx context.Context, contexts []string) int {
+	if len(a.Substring) > 0 || a.writesWithoutPrompt() {
+		a.printContexts(contexts)
+	}
 	errCount := 0
 	for _, kubeContext := range contexts {
 		errCount += a.runContext(ctx, kubeContext)
 	}
 	return errCount
+}
+
+// writesWithoutPrompt reports whether the run changes stacks without asking
+// for each one: fix-stuck never asks, replan, suspend and resume do with -y.
+func (a *App) writesWithoutPrompt() bool {
+	if a.Opts.FixStuck {
+		return true
+	}
+	return a.Opts.Yes && (a.Opts.Replan || a.Opts.Suspend || a.Opts.Resume)
+}
+
+// printContexts lists the contexts of this run so the user sees the fan-out,
+// and which of them were picked by substring rather than by exact name.
+func (a *App) printContexts(contexts []string) {
+	a.UI.Println("Contexts of this run:")
+	for _, kubeContext := range contexts {
+		if entry, ok := a.Substring[kubeContext]; ok {
+			a.UI.Printf("  %s (matched by substring %q)\n", kubeContext, entry)
+		} else {
+			a.UI.Printf("  %s\n", kubeContext)
+		}
+	}
 }
 
 func (a *App) runContext(ctx context.Context, kubeContext string) int {
@@ -133,7 +161,7 @@ func (a *App) runStack(ctx context.Context, c *tf.Client, plans *tf.Plans, kubeC
 	stuck, since := tf.Stuck(obj.Status.Conditions, a.Now(), a.Opts.StuckThreshold)
 	if stuck {
 		a.UI.Yellow("Service stack %s is stuck since %s", stack, since.UTC().Format(time.RFC3339))
-		if !a.Opts.FixStuck {
+		if !a.Opts.Replan && !a.Opts.Suspend && !a.Opts.Resume && !a.Opts.FixStuck {
 			a.UI.Yellow("Please rerun with --fix-stuck to fix this.")
 		}
 	}
@@ -146,7 +174,7 @@ func (a *App) runStack(ctx context.Context, c *tf.Client, plans *tf.Plans, kubeC
 
 	switch {
 	case a.Opts.Replan || a.Opts.FixStuck:
-		if stuck {
+		if a.Opts.FixStuck && stuck {
 			a.UI.Yellow("Triggering replan of stuck plan...")
 		} else if !a.confirm("Triggering replan") {
 			return nil

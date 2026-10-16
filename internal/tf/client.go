@@ -107,6 +107,11 @@ func (c *Client) SetSuspend(ctx context.Context, name string, suspend bool) erro
 
 // Replan does what `tfctl replan` does: clear the pending plan in the status,
 // mark the object as not ready and request a reconciliation.
+//
+// A JSON merge patch replaces status.conditions as a whole, so the patch
+// carries the resourceVersion of the read. If the controller updated the object
+// in between, the API server answers with a conflict and the retry re-reads
+// instead of overwriting the controller's condition changes.
 func (c *Client) Replan(ctx context.Context, name string) error {
 	if c.DryRun {
 		_, _ = fmt.Fprintf(c.Out, "[dry-run] would clear status.plan.pending, status.lastPlannedRevision, status.lastAttemptedRevision, set Ready=False (ReplanRequested) and annotate %s=<now> on terraform %s/%s\n",
@@ -118,7 +123,7 @@ func (c *Client) Replan(ctx context.Context, name string) error {
 		if err != nil {
 			return err
 		}
-		patch := client.MergeFrom(tf.DeepCopy())
+		patch := client.MergeFromWithOptions(tf.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		apimeta.SetStatusCondition(&tf.Status.Conditions, metav1.Condition{
 			Type:    meta.ReadyCondition,
 			Status:  metav1.ConditionFalse,
@@ -186,6 +191,10 @@ func Summary(tf *infrav1.Terraform, now time.Time) string {
 }
 
 func age(d time.Duration) string {
+	if d < 0 {
+		// Local clock behind the cluster; do not print negative ages.
+		d = 0
+	}
 	switch {
 	case d >= 24*time.Hour:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))

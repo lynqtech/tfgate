@@ -65,7 +65,13 @@ func (u *UI) Error(format string, a ...any) {
 // a plan cannot move the cursor, erase lines or overwrite text the user has
 // already seen. Carriage returns are dropped for the same reason. Bidi
 // override and isolate characters are removed because they reorder text
-// visually. Colors in the original text are lost.
+// visually. All invisible format characters (Unicode category Cf: LRM, RLM,
+// ALM, zero-width characters, word joiner, BOM, tag characters, soft hyphen and
+// the bidi controls above) are removed too, as are the line and paragraph
+// separators U+2028 and U+2029, so cluster text cannot hide or disguise content.
+// This also drops U+200D (ZWJ) inside emoji sequences and U+200C (ZWNJ) in
+// Persian; that is acceptable for a terminal plan viewer. Colors in the
+// original text are lost.
 func Sanitize(s string) string {
 	s = ansiSequence.ReplaceAllString(s, "")
 	s = strings.ReplaceAll(s, "\r\n", "\n")
@@ -75,7 +81,7 @@ func Sanitize(s string) string {
 			return r
 		case unicode.IsControl(r):
 			return -1
-		case r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069:
+		case unicode.Is(unicode.Cf, r), r == 0x2028, r == 0x2029:
 			return -1
 		}
 		return r

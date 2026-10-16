@@ -178,3 +178,39 @@ func TestRunCompletionIsRegistered(t *testing.T) {
 		t.Errorf("run(__complete) = %d, want 0", code)
 	}
 }
+
+// TestExecutePrintsSubstringMatches checks that a substring selection is shown
+// before any work, while an exact name stays silent.
+func TestExecutePrintsSubstringMatches(t *testing.T) {
+	tests := []struct {
+		name    string
+		context string
+		want    string
+	}{
+		{"substring", "stage", "clientA-stage (matched by substring \"stage\")"},
+		{"exact", "clientA-stage", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			out := &bytes.Buffer{}
+			opts := newOpts(writeKubeconfig(t, kubeconfigWithCurrent))
+			opts.Contexts = []string{tt.context}
+
+			execute(ctx, ui.NewWithIO(strings.NewReader(""), out, out), opts)
+
+			got := out.String()
+			if tt.want == "" {
+				if strings.Contains(got, "Contexts of this run:") {
+					t.Errorf("exact match must not print the list, output:\n%s", got)
+				}
+				return
+			}
+			list, work := strings.Index(got, tt.want), strings.Index(got, "Iterating over")
+			if list < 0 || work < 0 || list > work {
+				t.Errorf("want %q before any work, output:\n%s", tt.want, got)
+			}
+		})
+	}
+}

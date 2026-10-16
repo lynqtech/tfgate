@@ -19,7 +19,9 @@ import (
 // DefaultKubeconfig is used when neither --kube nor $KUBECONFIG is set.
 const DefaultKubeconfig = "~/.kube/lynqtech/config"
 
-// Client-side rate limit. kubectl uses QPS 50, burst 300.
+// Client-side rate limit. The client-go defaults (5 QPS, burst 10) made a run
+// over ~150 stacks take about 28 s, so the limit is raised well above them.
+// The values are a pragmatic choice, not copied from another tool.
 const (
 	clientQPS   = 50
 	clientBurst = 100
@@ -94,15 +96,19 @@ func (c *Config) CurrentContext() string { return c.current }
 //     filter (e.g. "stage" selects every context containing "stage").
 //
 // Entries that match nothing are returned as errors; resolution continues.
-func ResolveContexts(available []string, current string, requested []string, all bool) ([]string, []error) {
+//
+// The second result maps every context that was selected by the substring
+// fallback to the entry that matched it. Exact matches are not listed, so the
+// caller can show the user what a loose entry such as "prod" expanded to.
+func ResolveContexts(available []string, current string, requested []string, all bool) ([]string, map[string]string, []error) {
 	if all {
-		return available, nil
+		return available, nil, nil
 	}
 	if len(requested) == 0 {
 		if current == "" {
-			return nil, []error{fmt.Errorf("no current context set, use --context or --all")}
+			return nil, nil, []error{fmt.Errorf("no current context set, use --context or --all")}
 		}
-		return []string{current}, nil
+		return []string{current}, nil, nil
 	}
 
 	exists := make(map[string]bool, len(available))
@@ -111,15 +117,18 @@ func ResolveContexts(available []string, current string, requested []string, all
 	}
 
 	var (
-		result []string
-		errs   []error
-		seen   = map[string]bool{}
+		result    []string
+		errs      []error
+		substring = map[string]string{}
+		seen      = map[string]bool{}
 	)
-	add := func(c string) {
-		if !seen[c] {
-			seen[c] = true
-			result = append(result, c)
+	add := func(c string) bool {
+		if seen[c] {
+			return false
 		}
+		seen[c] = true
+		result = append(result, c)
+		return true
 	}
 	for _, r := range requested {
 		r = strings.TrimSpace(r)
@@ -133,7 +142,9 @@ func ResolveContexts(available []string, current string, requested []string, all
 		matched := false
 		for _, c := range available {
 			if strings.Contains(c, r) {
-				add(c)
+				if add(c) {
+					substring[c] = r
+				}
 				matched = true
 			}
 		}
@@ -141,7 +152,7 @@ func ResolveContexts(available []string, current string, requested []string, all
 			errs = append(errs, fmt.Errorf("context '%s' does not exist. Available contexts are: %s", r, strings.Join(available, ", ")))
 		}
 	}
-	return result, errs
+	return result, substring, errs
 }
 
 // CompleteContexts returns the shell completions for a comma-separated

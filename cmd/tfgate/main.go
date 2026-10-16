@@ -112,7 +112,7 @@ func execute(ctx context.Context, u *ui.UI, opts app.Options) int {
 		return 1
 	}
 
-	contexts, errs := kube.ResolveContexts(cfg.Contexts(), cfg.CurrentContext(), opts.Contexts, opts.All)
+	contexts, substring, errs := kube.ResolveContexts(cfg.Contexts(), cfg.CurrentContext(), opts.Contexts, opts.All)
 	for _, e := range errs {
 		u.Error("%v", e)
 	}
@@ -129,7 +129,8 @@ func execute(ctx context.Context, u *ui.UI, opts app.Options) int {
 		NewClient: func(kubeContext string) (client.Client, error) {
 			return cfg.Client(kubeContext, scheme)
 		},
-		Now: time.Now,
+		Now:       time.Now,
+		Substring: substring,
 	}
 	if a.Run(ctx, contexts)+len(errs) > 0 {
 		return 1

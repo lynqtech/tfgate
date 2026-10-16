@@ -28,7 +28,7 @@ func TestResolveContexts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, errs := ResolveContexts(available, "clientA-stage", tt.requested, tt.all)
+			got, _, errs := ResolveContexts(available, "clientA-stage", tt.requested, tt.all)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("contexts = %v, want %v", got, tt.want)
 			}
@@ -61,8 +61,38 @@ func TestKubeconfigPaths(t *testing.T) {
 	}
 }
 
+func TestResolveContextsReportsSubstringMatches(t *testing.T) {
+	avail := []string{"prod", "preprod", "prod-eu"}
+	tests := []struct {
+		name      string
+		requested []string
+		want      []string
+		wantSub   map[string]string
+	}{
+		{"exact is silent", []string{"prod"}, []string{"prod"}, map[string]string{}},
+		{"substring lists every match", []string{"eu"}, []string{"prod-eu"}, map[string]string{"prod-eu": "eu"}},
+		{"mixed", []string{"prod", "pre"}, []string{"prod", "preprod"}, map[string]string{"preprod": "pre"}},
+		{"already selected is not marked", []string{"prod-eu", "eu"}, []string{"prod-eu"}, map[string]string{}},
+		{"no entry", nil, []string{"prod"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, sub, errs := ResolveContexts(avail, "prod", tt.requested, false)
+			if len(errs) != 0 {
+				t.Fatalf("errors = %v", errs)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("contexts = %v, want %v", got, tt.want)
+			}
+			if !reflect.DeepEqual(sub, tt.wantSub) {
+				t.Errorf("substring = %v, want %v", sub, tt.wantSub)
+			}
+		})
+	}
+}
+
 func TestResolveContextsWithoutCurrentContext(t *testing.T) {
-	got, errs := ResolveContexts(available, "", nil, false)
+	got, _, errs := ResolveContexts(available, "", nil, false)
 	if len(got) != 0 {
 		t.Errorf("contexts = %v, want none", got)
 	}
@@ -72,7 +102,7 @@ func TestResolveContextsWithoutCurrentContext(t *testing.T) {
 }
 
 func TestResolveContextsUnknownNamesAvailable(t *testing.T) {
-	_, errs := ResolveContexts(available, "clientA-stage", []string{"nope"}, false)
+	_, _, errs := ResolveContexts(available, "clientA-stage", []string{"nope"}, false)
 	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "clientA-prod") {
 		t.Errorf("errors = %v, want the list of available contexts", errs)
 	}

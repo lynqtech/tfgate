@@ -85,6 +85,86 @@ func TestReplanMirrorsTfctl(t *testing.T) {
 	}
 }
 
+// TestReplanRetriesOnConflict checks that the status patch is optimistically
+// locked: when the controller updates the object between Replan's read and its
+// patch, the API server must answer with a conflict, and the retry must read
+// again so that the controller's condition is not overwritten.
+func TestReplanRetriesOnConflict(t *testing.T) {
+	obj := newTerraform("stack-a", "plan-main-abc123", "human")
+	attempts := 0
+	tc := newClientWith(t, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, o client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
+			attempts++
+			if attempts == 1 {
+				// The controller adds a condition before the patch arrives.
+				cur := &infrav1.Terraform{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(o), cur); err != nil {
+					return err
+				}
+				apimeta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+					Type: "Other", Status: metav1.ConditionTrue, Reason: "FromController",
+				})
+				if err := c.Status().Update(ctx, cur); err != nil {
+					return err
+				}
+			}
+			return c.SubResource(sub).Patch(ctx, o, p, opts...)
+		},
+	}, obj)
+
+	if err := tc.Replan(context.Background(), "stack-a"); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Errorf("status patch attempts = %d, want 2 (conflict, then success)", attempts)
+	}
+	got, err := tc.Get(context.Background(), "stack-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Plan.Pending != "" {
+		t.Errorf("pending = %q, want it cleared", got.Status.Plan.Pending)
+	}
+	if ready := apimeta.FindStatusCondition(got.Status.Conditions, meta.ReadyCondition); ready == nil || ready.Reason != "ReplanRequested" {
+		t.Errorf("Ready condition = %+v, want ReplanRequested", ready)
+	}
+	if other := apimeta.FindStatusCondition(got.Status.Conditions, "Other"); other == nil {
+		t.Error("condition added by the controller was overwritten")
+	}
+	if got.Annotations[meta.ReconcileRequestAnnotation] == "" {
+		t.Errorf("%s not set", meta.ReconcileRequestAnnotation)
+	}
+}
+
+// TestReplanGivesUpOnPersistentConflict makes sure the retry loop ends and
+// that no reconcile is requested when the status could not be cleared.
+func TestReplanGivesUpOnPersistentConflict(t *testing.T) {
+	obj := newTerraform("stack-a", "plan-main-abc123", "human")
+	conflicts := 0
+	metaPatches := 0
+	tc := newClientWith(t, interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, o client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			conflicts++
+			return apierrors.NewConflict(infrav1.GroupVersion.WithResource("terraforms").GroupResource(), o.GetName(), errors.New("stale"))
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
+			metaPatches++
+			return c.Patch(ctx, o, p, opts...)
+		},
+	}, obj)
+
+	err := tc.Replan(context.Background(), "stack-a")
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("Replan error = %v, want a conflict", err)
+	}
+	if conflicts < 2 {
+		t.Errorf("status patch attempts = %d, want retries", conflicts)
+	}
+	if metaPatches != 0 {
+		t.Errorf("%d annotation patches after a failed status patch, want 0", metaPatches)
+	}
+}
+
 // TestApproveRefusesWhenObjectChangesBetweenReadAndWrite covers the window
 // between Approve's re-read and its patch: the controller replans right after
 // the pending check, so the approval must be rejected by the API server.
@@ -396,6 +476,7 @@ func TestAge(t *testing.T) {
 		want string
 	}{
 		{0, "0m"},
+		{-2 * time.Minute, "0m"},
 		{30 * time.Second, "0m"},
 		{59 * time.Minute, "59m"},
 		{time.Hour, "1h"},

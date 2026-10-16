@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -24,6 +26,12 @@ const jsonPlanSuffix = ".json"
 // chunks. It is not exported by the plan package.
 const maxChunkSize = 1024 * 1024
 
+// bulkTTL is how long the lists of a bulk Plans are served from memory. After
+// that, the next lookup lists again, so a long interactive run does not show
+// plans that the controller has replaced in the meantime. It bounds the extra
+// API calls to one list per kind and TTL.
+const bulkTTL = 60 * time.Second
+
 type planKey struct{ name, workspace string }
 
 // Plans reads human-readable plans the same way `tfctl show plan` does: from
@@ -33,11 +41,29 @@ type planKey struct{ name, workspace string }
 // In bulk mode, the first lookup lists the plan ConfigMaps (or Secrets) of
 // all stacks in one call and later lookups are served from memory. Use bulk
 // mode when iterating over many stacks, and per-stack mode for a single one.
+// The lists are reloaded once they are older than bulkTTL.
 type Plans struct {
-	kube       client.Client
-	bulk       bool
-	configMaps map[planKey][]corev1.ConfigMap
-	secrets    map[planKey][]corev1.Secret
+	// Now returns the current time, time.Now if nil.
+	Now func() time.Time
+
+	kube         client.Client
+	bulk         bool
+	configMaps   map[planKey][]corev1.ConfigMap
+	configMapsAt time.Time
+	secrets      map[planKey][]corev1.Secret
+	secretsAt    time.Time
+}
+
+func (p *Plans) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
+}
+
+// expired reports whether a bulk list loaded at loadedAt is older than bulkTTL.
+func (p *Plans) expired(loadedAt time.Time) bool {
+	return p.now().Sub(loadedAt) > bulkTTL
 }
 
 // NewPlans returns a plan reader. See Plans for the meaning of bulk.
@@ -185,6 +211,14 @@ func listOptions(namespace string, k *planKey) []client.ListOption {
 	}}
 }
 
+// maybeJSONPlan reports whether a plan-name label value can belong to the JSON
+// plan Secret of a stack. Those carry the ".json" suffix, except that
+// plan.SafeLabelValue replaces the tail of values longer than 63 characters
+// with a hash, so a value of that length is kept as well.
+func maybeJSONPlan(label string) bool {
+	return strings.HasSuffix(label, jsonPlanSuffix) || len(label) >= 63
+}
+
 func keyOf(labels map[string]string) planKey {
 	return planKey{name: labels[plan.TFPlanNameLabel], workspace: labels[plan.TFPlanWorkspaceLabel]}
 }
@@ -197,12 +231,13 @@ func (p *Plans) planConfigMaps(ctx context.Context, namespace string, k planKey)
 		}
 		return list.Items, nil
 	}
-	if p.configMaps == nil {
+	if p.configMaps == nil || p.expired(p.configMapsAt) {
 		list := &corev1.ConfigMapList{}
 		if err := p.kube.List(ctx, list, listOptions(namespace, nil)...); err != nil {
 			return nil, fmt.Errorf("listing plan configmaps: %w", err)
 		}
 		p.configMaps = map[planKey][]corev1.ConfigMap{}
+		p.configMapsAt = p.now()
 		for _, cm := range list.Items {
 			p.configMaps[keyOf(cm.Labels)] = append(p.configMaps[keyOf(cm.Labels)], cm)
 		}
@@ -218,13 +253,19 @@ func (p *Plans) planSecrets(ctx context.Context, namespace string, k planKey) ([
 		}
 		return list.Items, nil
 	}
-	if p.secrets == nil {
+	if p.secrets == nil || p.expired(p.secretsAt) {
 		list := &corev1.SecretList{}
 		if err := p.kube.List(ctx, list, listOptions(namespace, nil)...); err != nil {
 			return nil, fmt.Errorf("listing plan secrets: %w", err)
 		}
 		p.secrets = map[planKey][]corev1.Secret{}
+		p.secretsAt = p.now()
 		for _, s := range list.Items {
+			// The label selector cannot tell the binary planfile Secrets from
+			// the JSON ones, so the large binary ones are dropped here.
+			if !maybeJSONPlan(s.Labels[plan.TFPlanNameLabel]) {
+				continue
+			}
 			p.secrets[keyOf(s.Labels)] = append(p.secrets[keyOf(s.Labels)], s)
 		}
 	}

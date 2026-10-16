@@ -718,3 +718,101 @@ func TestFailedWritesAreReported(t *testing.T) {
 		})
 	}
 }
+
+// TestPlainReplanConfirmsStuckStack makes sure only --fix-stuck replans a
+// stuck stack without asking; a plain --replan asks like for any other stack.
+func TestPlainReplanConfirmsStuckStack(t *testing.T) {
+	tests := []struct {
+		name         string
+		opts         Options
+		input        string
+		wantPrompt   bool
+		wantReplaned bool
+	}{
+		{"replan declined", Options{Replan: true}, "n\n", true, false},
+		{"replan confirmed", Options{Replan: true}, "y\n", true, true},
+		{"replan with -y", Options{Replan: true, Yes: true}, "", false, true},
+		{"fix-stuck does not ask", Options{FixStuck: true}, "", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, c, out := newApp(t, tt.opts, tt.input, stuckTerraform("stack-a"))
+
+			if errs := a.Run(context.Background(), []string{"ctx"}); errs != 0 {
+				t.Fatalf("Run errors = %d, output:\n%s", errs, out)
+			}
+			if got := strings.Contains(out.String(), "[Y=yes"); got != tt.wantPrompt {
+				t.Errorf("prompted = %v, want %v, output:\n%s", got, tt.wantPrompt, out)
+			}
+			replanned := get(t, c, "stack-a").Status.LastPlannedRevision == ""
+			if replanned != tt.wantReplaned {
+				t.Errorf("replanned = %v, want %v", replanned, tt.wantReplaned)
+			}
+		})
+	}
+}
+
+// TestFixStuckHint checks that the hint only shows when no action flag is set.
+func TestFixStuckHint(t *testing.T) {
+	const hint = "--fix-stuck to fix this"
+	tests := []struct {
+		name     string
+		opts     Options
+		wantHint bool
+	}{
+		{"review", Options{}, true},
+		{"replan", Options{Replan: true, Yes: true}, false},
+		{"suspend", Options{Suspend: true, Yes: true}, false},
+		{"resume", Options{Resume: true, Yes: true}, false},
+		{"fix-stuck", Options{FixStuck: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, _, out := newApp(t, tt.opts, "n\n", stuckTerraform("stack-a"))
+			a.Run(context.Background(), []string{"ctx"})
+			if got := strings.Contains(out.String(), hint); got != tt.wantHint {
+				t.Errorf("hint shown = %v, want %v, output:\n%s", got, tt.wantHint, out)
+			}
+		})
+	}
+}
+
+func TestRunPrintsContexts(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      Options
+		substring map[string]string
+		want      []string
+		wantNone  bool
+	}{
+		{"read-only review stays quiet", Options{}, nil, nil, true},
+		{"replan asks per stack, stays quiet", Options{Replan: true}, nil, nil, true},
+		{"substring match is reported", Options{}, map[string]string{"prod-eu": "eu"}, []string{"  ctx-a\n", "  prod-eu (matched by substring \"eu\")\n"}, false},
+		{"replan with -y lists contexts", Options{Replan: true, Yes: true}, nil, []string{"  ctx-a\n", "  prod-eu\n"}, false},
+		{"suspend with -y lists contexts", Options{Suspend: true, Yes: true}, nil, []string{"  ctx-a\n"}, false},
+		{"resume with -y lists contexts", Options{Resume: true, Yes: true}, nil, []string{"  ctx-a\n"}, false},
+		{"fix-stuck lists contexts", Options{FixStuck: true}, nil, []string{"  ctx-a\n"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.opts.Stack = "stack-a"
+			a, _, out := newApp(t, tt.opts, "", newTerraform("stack-a", ""))
+			a.Substring = tt.substring
+
+			a.Run(context.Background(), []string{"ctx-a", "prod-eu"})
+
+			got := out.String()
+			if tt.wantNone != !strings.Contains(got, "Contexts of this run:") {
+				t.Errorf("unexpected context list state, output:\n%s", got)
+			}
+			if !tt.wantNone && !strings.HasPrefix(got, "Contexts of this run:\n") {
+				t.Errorf("context list must come before any work, output:\n%s", got)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("output lacks %q, output:\n%s", w, got)
+				}
+			}
+		})
+	}
+}

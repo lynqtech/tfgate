@@ -68,6 +68,8 @@ tfgate [flags]
 
 `--replan`, `--suspend` and `--resume` are mutually exclusive. `--all` and `--context` are mutually exclusive.
 
+Before any work tfgate prints the contexts of the run when a `-c` entry was resolved by substring (the matching entry is shown per context), and when `--fix-stuck` runs, or `--replan`, `--suspend` or `--resume` runs with `-y`, since these change stacks without a per-stack prompt.
+
 ### Examples
 
 ```sh
